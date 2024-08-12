@@ -1,7 +1,7 @@
 # algorithm-w-rs
 Simple implementation of Hindley-Milner type inference in Rust.
 
-Implements Algorithm W, based on `https://github.com/mgrabmueller/AlgorithmW`.
+Implements Algorithm W, based on [https://github.com/mgrabmueller/AlgorithmW](https://github.com/mgrabmueller/AlgorithmW).
 
 ## Usage
 

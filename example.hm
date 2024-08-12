@@ -1,0 +1,4 @@
+church_zero = λs λz z
+church_succ = λp λs λz (s (p s z))
+
+church_add = λm λn λs λz (m s (n s z))

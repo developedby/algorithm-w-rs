@@ -1,12 +1,21 @@
 //! Simple implementation of Hindley-Milner type inference in Rust.
 //! Implements Algorithm W, based on `https://github.com/mgrabmueller/AlgorithmW`.
 
-use std::{collections::{BTreeMap, BTreeSet}, str::FromStr};
+use std::{
+  collections::{BTreeMap, BTreeSet},
+  str::FromStr,
+};
 use TSPL::{new_parser, Parser};
 
 pub fn infer(program: Program) -> Result<ProgramTypes, String> {
-  let mut ctx = InferCtx::default();
-  ctx.infer_program(program)
+  let mut types = BTreeMap::new();
+  let mut var_gen = VarGen::default();
+  for (name, term) in &program.terms {
+    let typ = infer_term(term, &mut var_gen)?;
+    types.insert(name.clone(), typ);
+  }
+  let types = refresh_vars(ProgramTypes(types));
+  Ok(types)
 }
 
 /* AST */
@@ -49,13 +58,9 @@ struct Subst(BTreeMap<String, Type>);
 #[derive(Clone, Default)]
 struct TypeEnv(BTreeMap<String, Scheme>);
 
-/// State monad for type inference.
-///
-/// Used to generate fresh type variables needed for type inference.
+/// Variable generator for type variables.
 #[derive(Default)]
-struct InferCtx {
-  var_counter: usize,
-}
+struct VarGen(usize);
 
 /* Implementations */
 
@@ -94,6 +99,14 @@ impl Scheme {
     let t = self.1.subst(&subst);
     Scheme(self.0.clone(), t)
   }
+
+  /// Converts a type scheme into a monomorphic type by assigning
+  /// fresh type variables to each variable bound by the scheme.
+  fn instantiate(&self, var_gen: &mut VarGen) -> Type {
+    let new_vars = self.0.iter().map(|_| var_gen.fresh());
+    let subst = Subst(self.0.iter().cloned().zip(new_vars).collect());
+    self.1.subst(&subst)
+  }
 }
 
 impl Subst {
@@ -130,138 +143,121 @@ impl TypeEnv {
   }
 }
 
-impl InferCtx {
-  fn infer_program(&mut self, program: Program) -> Result<ProgramTypes, String> {
-    let mut types = BTreeMap::new();
-    for (name, term) in &program.terms {
-      let typ = self.infer(term)?;
-      types.insert(name.clone(), typ);
-    }
-    let types = self.refresh_vars(ProgramTypes(types));
-    Ok(types)
-  }
-
-  /// Infer the type of a term in the given environment.
-  fn infer(&mut self, term: &Term) -> Result<Type, String> {
-    let (subst, typ) = self.infer_term(&TypeEnv::default(), term)?;
-    Ok(typ.subst(&subst))
-  }
-
-  /// Infer the type of a term in the given environment.
-  ///
-  /// The type environment must contain bindings for all the free variables of the term.
-  ///
-  /// The returned substitution records the type constraints imposed on type variables by the term.
-  /// The returned type is the type of the term.
-  fn infer_term(&mut self, env: &TypeEnv, term: &Term) -> Result<(Subst, Type), String> {
-    maybe_grow(|| match term {
-      Term::Var(name) => match env.0.get(name) {
-        Some(scheme) => {
-          let typ = self.instantiate(scheme);
-          Ok((Subst::default(), typ))
-        }
-        None => Err(format!("unbound variable '{}'", name)),
-      },
-      Term::Lam(name, body) => {
-        let type_var = self.new_type_var();
-        let mut env = env.clone();
-        env.0.insert(name.clone(), Scheme(vec![], type_var.clone()));
-        let (subst, bod_type) = self.infer_term(&env, body)?;
-        let arg_type = type_var.subst(&subst);
-        let lam_type = Type::Arr(Box::new(arg_type), Box::new(bod_type));
-        Ok((subst, lam_type))
-      }
-      Term::App(fun, arg) => {
-        let type_var = self.new_type_var();
-        let (subst1, fun_type) = self.infer_term(env, fun)?;
-        let (subst2, arg_type) = self.infer_term(&env.subst(&subst1), arg)?;
-        let subst3 =
-          self.unify(fun_type, Type::Arr(Box::new(arg_type), Box::new(type_var.clone())))?;
-        let subst = subst3.compose(&subst2).compose(&subst1);
-        let app_type = type_var.subst(&subst);
-        Ok((subst, app_type))
-      }
-      Term::Let(name, val, body) => {
-        let (subst1, val_type) = self.infer_term(env, val)?;
-        let val_env = env.subst(&subst1);
-        let val_scheme = val_env.generalize(&val_type);
-        let mut body_env = env.clone();
-        body_env.0.insert(name.clone(), val_scheme);
-        let (subst2, body_type) = self.infer_term(&body_env, body)?;
-        Ok((subst1.compose(&subst2), body_type))
-      }
-    })
-  }
-
-  /// Converts a type scheme into a monomorphic type by assigning
-  /// fresh type variables to each variable bound by the scheme.
-  fn instantiate(&mut self, scheme: &Scheme) -> Type {
-    let new_vars = scheme.0.iter().map(|_| self.new_type_var());
-    let subst = Subst(scheme.0.iter().cloned().zip(new_vars).collect());
-    scheme.1.subst(&subst)
-  }
-
-  fn unify(&mut self, t1: Type, t2: Type) -> Result<Subst, String> {
-    maybe_grow(|| match (t1, t2) {
-      (Type::Arr(t11, t12), Type::Arr(t21, t22)) => {
-        let s1 = self.unify(*t11, *t21)?;
-        let s2 = self.unify(t12.subst(&s1), t22.subst(&s1))?;
-        Ok(s1.compose(&s2))
-      }
-      (t1, Type::Var(x)) => self.bind_var(x, t1),
-      (Type::Var(x), t2) => self.bind_var(x, t2),
-    })
-  }
-
-  /// Try to bind variable `x` to `t` and return that binding as a substitution.
-  ///
-  /// Doesn't bind a variable to itself and doesn't bind a variable if it occurs free in `t`.
-  fn bind_var(&mut self, x: String, t: Type) -> Result<Subst, String> {
-    if let Type::Var(y) = &t {
-      if y == &x {
-        return Ok(Subst::default());
-      }
-    }
-    if t.free_type_vars().contains(&x) {
-      return Err(format!(
-        "cannot bind variable '{x}' to term {t} because it occurs as a free variable"
-      ));
-    }
-    Ok(Subst(BTreeMap::from([(x, t)])))
-  }
-
-  fn new_type_var(&mut self) -> Type {
-    let x = format!("a{}", self.var_counter);
-    self.var_counter += 1;
+impl VarGen {
+  fn fresh(&mut self) -> Type {
+    let x = format!("a{}", self.0);
+    self.0 += 1;
     Type::Var(x)
   }
+}
 
-  fn refresh_vars(&mut self, mut types: ProgramTypes) -> ProgramTypes {
-    for typ in types.0.values_mut() {
-      self.var_counter = 0;
-      self.refresh_vars_in_type(typ, &mut BTreeMap::new());
+/// Infer the type of a term in the given environment.
+fn infer_term(term: &Term, var_gen: &mut VarGen) -> Result<Type, String> {
+  let (subst, typ) = infer_term_go(&TypeEnv::default(), term, var_gen)?;
+  Ok(typ.subst(&subst))
+}
+
+/// Infer the type of a term in the given environment.
+///
+/// The type environment must contain bindings for all the free variables of the term.
+///
+/// The returned substitution records the type constraints imposed on type variables by the term.
+/// The returned type is the type of the term.
+fn infer_term_go(
+  env: &TypeEnv,
+  term: &Term,
+  var_gen: &mut VarGen,
+) -> Result<(Subst, Type), String> {
+  maybe_grow(|| match term {
+    Term::Var(name) => match env.0.get(name) {
+      Some(scheme) => {
+        let typ = scheme.instantiate(var_gen);
+        Ok((Subst::default(), typ))
+      }
+      None => Err(format!("unbound variable '{}'", name)),
+    },
+    Term::Lam(name, body) => {
+      let type_var = var_gen.fresh();
+      let mut env = env.clone();
+      env.0.insert(name.clone(), Scheme(vec![], type_var.clone()));
+      let (subst, bod_type) = infer_term_go(&env, body, var_gen)?;
+      let arg_type = type_var.subst(&subst);
+      let lam_type = Type::Arr(Box::new(arg_type), Box::new(bod_type));
+      Ok((subst, lam_type))
     }
-    types
-  }
+    Term::App(fun, arg) => {
+      let type_var = var_gen.fresh();
+      let (subst1, fun_type) = infer_term_go(env, fun, var_gen)?;
+      let (subst2, arg_type) = infer_term_go(&env.subst(&subst1), arg, var_gen)?;
+      let subst3 = unify(fun_type, Type::Arr(Box::new(arg_type), Box::new(type_var.clone())))?;
+      let subst = subst3.compose(&subst2).compose(&subst1);
+      let app_type = type_var.subst(&subst);
+      Ok((subst, app_type))
+    }
+    Term::Let(name, val, body) => {
+      let (subst1, val_type) = infer_term_go(env, val, var_gen)?;
+      let val_env = env.subst(&subst1);
+      let val_scheme = val_env.generalize(&val_type);
+      let mut body_env = env.clone();
+      body_env.0.insert(name.clone(), val_scheme);
+      let (subst2, body_type) = infer_term_go(&body_env, body, var_gen)?;
+      Ok((subst1.compose(&subst2), body_type))
+    }
+  })
+}
 
-  fn refresh_vars_in_type(&mut self, typ: &mut Type, map: &mut BTreeMap<String, String>) {
-    maybe_grow(|| match typ {
-      Type::Var(x) => {
-        if let Some(y) = map.get(x) {
-          *typ = Type::Var(y.clone());
-        } else {
-          let y = format!("a{}", self.var_counter);
-          self.var_counter += 1;
-          map.insert(x.clone(), y.clone());
-          *typ = Type::Var(y);
-        }
-      }
-      Type::Arr(t1, t2) => {
-        self.refresh_vars_in_type(t1, map);
-        self.refresh_vars_in_type(t2, map);
-      }
-    })
+fn unify(t1: Type, t2: Type) -> Result<Subst, String> {
+  maybe_grow(|| match (t1, t2) {
+    (Type::Arr(t11, t12), Type::Arr(t21, t22)) => {
+      let s1 = unify(*t11, *t21)?;
+      let s2 = unify(t12.subst(&s1), t22.subst(&s1))?;
+      Ok(s1.compose(&s2))
+    }
+    (t1, Type::Var(x)) => bind_var(x, t1),
+    (Type::Var(x), t2) => bind_var(x, t2),
+  })
+}
+
+/// Try to bind variable `x` to `t` and return that binding as a substitution.
+///
+/// Doesn't bind a variable to itself and doesn't bind a variable if it occurs free in `t`.
+fn bind_var(x: String, t: Type) -> Result<Subst, String> {
+  if let Type::Var(y) = &t {
+    if y == &x {
+      return Ok(Subst::default());
+    }
   }
+  if t.free_type_vars().contains(&x) {
+    return Err(format!(
+      "cannot bind variable '{x}' to term {t} because it occurs as a free variable"
+    ));
+  }
+  Ok(Subst(BTreeMap::from([(x, t)])))
+}
+
+fn refresh_vars(mut types: ProgramTypes) -> ProgramTypes {
+  for typ in types.0.values_mut() {
+    refresh_vars_go(typ, &mut BTreeMap::new(), &mut VarGen::default());
+  }
+  types
+}
+
+fn refresh_vars_go(typ: &mut Type, map: &mut BTreeMap<String, Type>, var_gen: &mut VarGen) {
+  maybe_grow(|| match typ {
+    Type::Var(x) => {
+      if let Some(y) = map.get(x) {
+        *typ = y.clone();
+      } else {
+        let y = var_gen.fresh();
+        map.insert(x.clone(), y.clone());
+        *typ = y;
+      }
+    }
+    Type::Arr(t1, t2) => {
+      refresh_vars_go(t1, map, var_gen);
+      refresh_vars_go(t2, map, var_gen);
+    }
+  })
 }
 
 /* Parser */

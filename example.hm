@@ -1,4 +1,16 @@
+id = λx x
+
 church_zero = λs λz z
 church_succ = λp λs λz (s (p s z))
-
 church_add = λm λn λs λz (m s (n s z))
+
+pair = λfst λsnd λp (p fst snd)
+fst = λp (p λfst λsnd fst)
+snd = λp (p λfst λsnd snd)
+swap = λp (p λfst λsnd λp (p snd fst))
+
+true = λt λf t
+false = λt λf f
+not = λb λt λf (b f t)
+
+flip = λf λx λy (f y x)

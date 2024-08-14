@@ -1,6 +1,6 @@
 /* CLI */
 
-use algorithm_w::{infer, Program, ProgramTypes};
+use algorithm_w::mutual_recursion::{elaborate, Program, ProgramTypes};
 
 fn main() {
   match do_cli() {
@@ -26,6 +26,6 @@ fn do_cli() -> Result<ProgramTypes, String> {
   let program = contents.parse::<Program>()?;
 
   // Infer the types.
-  let types = infer(program)?;
+  let types = elaborate(program)?;
   Ok(types)
 }

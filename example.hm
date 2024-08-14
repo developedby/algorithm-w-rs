@@ -8,9 +8,33 @@ pair = λfst λsnd λp (p fst snd)
 fst = λp (p λfst λsnd fst)
 snd = λp (p λfst λsnd snd)
 swap = λp (p λfst λsnd λp (p snd fst))
+swap2 = λp (p λfst λsnd (pair snd fst))
 
 true = λt λf t
 false = λt λf f
+
 not = λb λt λf (b f t)
+not2 = λx (x false true)
+not3 = λx (x λt λf f λt λf t)
 
 flip = λf λx λy (f y x)
+
+y = λf (f (y f))
+
+zero = λs λz z
+succ = λp λs λz (s p)
+
+is_even = λn (n λp (is_odd p) true)
+is_odd = λn (n λp (is_even p) false)
+
+// (equal (succ a.p) (succ b.p)) = (equal a.p b.p)
+// (equal  zero      (succ b.p)) = false
+// (equal (succ a.p)  zero     ) = false
+// (equal  zero       zero     ) = true
+equal = λa λb (a equal_a_succ equal_a_zero b)
+equal_a_succ = λa.p λb (b equal_a_succ_b_succ equal_a_succ_b_zero a.p)
+equal_a_zero = λb (b equal_a_zero_b_succ equal_a_zero_b_zero)
+equal_a_succ_b_succ = λb.p λa.p (equal a.p b.p)
+equal_a_succ_b_zero = λa.p false
+equal_a_zero_b_succ = λb.p false
+equal_a_zero_b_zero = true

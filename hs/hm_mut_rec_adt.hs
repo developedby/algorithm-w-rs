@@ -155,13 +155,12 @@ inferFns :: TypeEnv -> Program -> RecGroups -> Infer [(String, Type)]
 inferFns _ _ [] = return []
 inferFns env program@(Program fns adts ctrs) (group : rest) = do
   tvs <- mapM (const fresh) group
-  let envAppend (name, tv) = Map.insert name (Scheme [] tv)
-      env' = foldr envAppend env (zip group tvs)
+  let env' = foldr envAppend env (zip group tvs)
   r <- inferGroup env' program group
   let (ss, ts) = unzip r
       unifyGroupElem s (t, tv) = do
         s' <- unify (apply s tv) t
-        return (compose s s')
+        return (compose s' s)
   s' <- foldM unifyGroupElem (composeMany ss) (zip ts tvs)
   let env' = apply s' env
       ts' = map (apply s') tvs
@@ -196,7 +195,7 @@ inferVar env program name = do
 
 inferLam env program name body = do
   tv <- fresh
-  let env' = Map.insert name (Scheme [] tv) env
+  let env' = envAppend (name, tv) env
   (s1, t1) <- infer env' program body
   return (s1, TArr (apply s1 tv) t1)
 
@@ -233,6 +232,7 @@ inferMat env program@(Program fns adts ctrs) scrut e cases = do
   s3 <- unify (apply s2 t1) scrut_t
   let s = composeMany [s3, s2, s1]
       fields = map (\(Constructor _ fields) -> map fst fields) exp_ctrs
+      fieldName var field = var ++ "." ++ field
       field_names = map (map (fieldName scrut)) fields
   (s', t) <- inferMatchCases (apply s env) program (zip3 field_names arms exp_ctrs) s
   return (s', t)
@@ -245,23 +245,21 @@ inferMat env program@(Program fns adts ctrs) scrut e cases = do
       tvs <- mapM (const fresh) fields
 
       -- Add the fields to the environment.
-      let env' = foldr (\(name, tv) env -> Map.insert name (Scheme [] tv) env) env (zip names tvs)
+      let env' = foldr envAppend env (zip names tvs)
 
       -- Infer the body and unify the inferred field types with the expected.
-      (s1, t1) <- infer env' program e
+      (s1,  t1) <- infer env' program e
       s2 <- unifyFields (zip (map (apply s1) tvs) (map (apply s) types))
-  
-      -- Recurse and unify with the other arms
-      (s', t') <- inferMatchCases env' program rest s
-      s'' <- unify (apply (compose s' s2) t1) t'
 
+      -- Recurse and unify with the other arms
+      (s', t') <- inferMatchCases env program rest s
+      s'' <- unify (apply (compose s' s2) t1) t'
       return (composeMany [s'', s', s2, s1, s], apply s'' t')
     inferMatchCases env program [] s = do
       tv <- fresh
       return (s, apply s tv)
 
-    fieldName var field = var ++ "." ++ field
-
+    unifyFields :: [(Type, Type)] -> Infer Subst
     unifyFields ((inf, exp) : rest) = do
       s <- unify inf exp
       s' <- unifyFields rest
@@ -288,6 +286,9 @@ generalize :: TypeEnv -> Type -> Scheme
 generalize env t = Scheme vars t
   where
     vars = Set.toList $ Set.difference (ftv t) (ftv env)
+
+envAppend :: (String, Type) -> TypeEnv -> TypeEnv
+envAppend (name, tv) = Map.insert name (Scheme [] tv)
 
 -- Generates a fresh type variable.
 fresh :: Infer Type

@@ -1,0 +1,95 @@
+type (Bool) = (True) | (False)
+type (Nat) = (Zero) | (Succ pred: (Nat))
+type (List t) = (Nil) | (Cons head: t tail: (List t))
+type (Tree t) = (Leaf val: t) | (Node lft: (Tree t) rgt: (Tree t))
+
+type (VarTree t) = (VarLeaf val: t) | (VarNode trees: (VarTreeSub t))
+type (VarTreeSub t) = (VarNil) | (VarCons head: (VarTree t) tail: (VarTreeSub t))
+
+not = λb match b = b {
+  True: False
+  False: True
+}
+
+rec to_zero = λn match n = n {
+  Zero: Zero
+  Succ: (to_zero n.pred)
+}
+
+pred = λn match n = n {
+  Zero: Zero
+  Succ: n.pred
+}
+
+and = λa λb match a = a {
+  True: match b = b {
+    True: True
+    False: False
+  }
+  False: False
+}
+
+not = λb match b = b {
+  True: False
+  False: True
+}
+
+rec add = λa λb match a = a {
+  Zero: b
+  Succ: (Succ (add a.pred b))
+}
+
+rec is_even = λn match n = n {
+  Zero: True
+  Succ: (not (is_even n.pred))
+}
+
+rec concat = λa λb match a = a {
+  Nil: b
+  Cons: (Cons a.head (concat a.tail b))
+}
+
+rec map = λf λa match a = a {
+  Nil: Nil
+  Cons: (Cons (f a.head) (map f a.tail))
+}
+
+rec foldr = λf λz λa match a = a {
+  Nil: z
+  Cons: (f a.head (foldr f z a.tail))
+}
+
+rec foldl = λf λacc λa match a = a {
+  Nil: acc
+  Cons: (foldl f (f acc a.head) a.tail)
+}
+
+rec reverse = λa match a = a {
+  Nil: Nil
+  Cons: (concat (reverse a.tail) (Cons a.head Nil))
+}
+
+rec length = λa match a = a {
+  Nil: Zero
+  Cons: (Succ (length a.tail))
+}
+
+DiffList/new = λt t
+DiffList/cons = λh λl λt (Cons h (l t))
+DiffList/append = λl λe λt (l (Cons e t))
+DiffList/concat = λl1 λl2 λt (l1 (l2 t))
+DiffList/wrap = λh λt (Cons h t)
+DiffList/to_list = λl (l Nil)
+
+rec Tree/foldr = λleaf λnode λt match t = t {
+  Leaf: (leaf t.val)
+  Node: (node (Tree/foldr leaf node t.lft) (Tree/foldr leaf node t.rgt))
+}
+
+Tree/to_list = λt (DiffList/to_list (Tree/foldr DiffList/wrap DiffList/concat t))
+
+// Because we don't have polymorphic recursion, f must be a closed operation on Nats. 
+rec polyRec = λf λxs match xs = xs {
+  Nil: Zero
+  Cons: (add (f xs.head) (polyRec (λx (f (f x))) xs.tail))
+}

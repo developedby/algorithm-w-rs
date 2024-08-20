@@ -1,0 +1,29 @@
+id = λx x
+flip = λf λx λy (f y x)
+const = λx λy x
+
+zero = λs λz z
+succ = λp λs λz (s (p s z))
+add = λm λn λs λz (m s (n s z))
+mul = λm λn λs λz (m (n s) z)
+exp = λm λn (n m)
+pred = λn λf λx (n (λg λh (h (g f))) (λu x) (λu u))
+fact = λn (n λf λn (mul n (f (pred n))) λx (succ zero) (succ zero))
+
+pair = λfst λsnd λp (p fst snd)
+fst = λp (p λfst λsnd fst)
+snd = λp (p λfst λsnd snd)
+swap = λp (p λfst λsnd λp (p snd fst))
+curry_pair = λf λp (p λfst λsnd (f fst snd))
+uncurry_pair = λf λfst λsnd (f λp (p fst snd))
+
+true = λt λf t
+false = λt λf f
+not = λb λt λf (b f t)
+not2 = λx (x false true)
+
+rec fix = λf (f (fix f))
+
+is_zero = λn (n λx false true)
+
+fix_id = (fix id)

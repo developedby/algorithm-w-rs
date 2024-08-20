@@ -1,17 +1,21 @@
-//! Simple implementation of Hindley-Milner type inference in Rust.
-//! Extended with non-recursive top-level function references.
-//!
+//! Hindley-Milner type system extended with ADTs.
 //! Implements Algorithm W, based on `https://github.com/mgrabmueller/AlgorithmW`.
 
 use std::{
-  collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
+  collections::{BTreeMap, BTreeSet},
+  f32::consts::E,
   str::FromStr,
 };
 use TSPL::{new_parser, Parser};
 
 pub fn elaborate(program: Program) -> Result<ProgramTypes, String> {
-  let types = infer_program(&program)?;
-  let types = refresh_vars(types);
+  let mut types = BTreeMap::new();
+  let mut var_gen = VarGen::default();
+  for (name, term) in &program.terms {
+    let typ = infer_term(term, &mut var_gen)?;
+    types.insert(name.clone(), typ);
+  }
+  let types = refresh_vars(ProgramTypes(types));
   Ok(types)
 }
 
@@ -19,7 +23,11 @@ pub fn elaborate(program: Program) -> Result<ProgramTypes, String> {
 
 #[derive(Default)]
 pub struct Program {
-  fns: BTreeMap<String, Term>,
+  terms: BTreeMap<String, Term>,
+  adts: BTreeMap<String, Adt>,
+
+  // Maps constructor names to the name of the ADT they belong to.
+  ctrs: BTreeMap<String, String>,
 }
 
 #[derive(Default)]
@@ -32,6 +40,14 @@ pub enum Term {
   Lam(String, Box<Term>),
   App(Box<Term>, Box<Term>),
   Let(String, Box<Term>, Box<Term>),
+  Ref(String),
+}
+
+pub struct Adt {
+  /// The arguments of the type constructor.
+  args: Vec<String>,
+  /// The constructors for a type, with the names of the fields and their types.
+  ctrs: BTreeMap<String, Vec<(String, Type)>>,
 }
 
 /// A monomorphic Hindley-Milner type.
@@ -59,100 +75,11 @@ struct VarGen(usize);
 
 /* Implementations */
 
-impl Program {
-  fn topological_order(&self) -> Result<Vec<String>, String> {
-    let dep_graph = self.build_dependency_graph()?;
-    let mut order = topological_sort(&dep_graph)?;
-    order.reverse();
-    Ok(order)
-  }
-
-  fn build_dependency_graph(&self) -> Result<HashMap<&str, HashSet<&str>>, String> {
-    let mut dep_graph = HashMap::new();
-    for (name, term) in &self.fns {
-      let deps = self.find_dependencies(term);
-      dep_graph.insert(name.as_str(), deps);
-    }
-    Ok(dep_graph)
-  }
-
-  fn find_dependencies<'a>(&'a self, term: &'a Term) -> HashSet<&'a str> {
-    let mut deps = HashSet::new();
-    let mut bound_vars = HashSet::new();
-    self.find_dependencies_rec(term, &mut deps, &mut bound_vars);
-    deps
-  }
-
-  fn find_dependencies_rec<'a>(
-    &'a self,
-    term: &'a Term,
-    deps: &mut HashSet<&'a str>,
-    bound_vars: &mut HashSet<&'a str>,
-  ) {
-    match term {
-      Term::Var(name) => {
-        if !bound_vars.contains(name.as_str()) && self.fns.contains_key(name) {
-          deps.insert(name);
-        }
-      }
-      Term::Lam(name, body) => {
-        let is_new = bound_vars.insert(name);
-        self.find_dependencies_rec(body, deps, bound_vars);
-        if is_new {
-          bound_vars.remove(name.as_str());
-        }
-      }
-      Term::App(fun, arg) => {
-        self.find_dependencies_rec(fun, deps, bound_vars);
-        self.find_dependencies_rec(arg, deps, bound_vars);
-      }
-      Term::Let(name, val, body) => {
-        self.find_dependencies_rec(val, deps, bound_vars);
-        let is_new = bound_vars.insert(name);
-        self.find_dependencies_rec(body, deps, bound_vars);
-        if is_new {
-          bound_vars.remove(name.as_str());
-        }
-      }
-    }
-  }
-}
-
-fn topological_sort(graph: &HashMap<&str, HashSet<&str>>) -> Result<Vec<String>, String> {
-  let mut in_degree: HashMap<&str, usize> = graph.keys().map(|k| (*k, 0)).collect();
-  for deps in graph.values() {
-    for dep in deps {
-      *in_degree.entry(dep).or_default() += 1;
-    }
-  }
-  let mut queue: VecDeque<&str> =
-    in_degree.iter().filter(|(_, &degree)| degree == 0).map(|(name, _)| *name).collect();
-  let mut result = Vec::new();
-  while let Some(node) = queue.pop_front() {
-    result.push(node.to_string());
-    if let Some(deps) = graph.get(node) {
-      for dep in deps {
-        if let Some(degree) = in_degree.get_mut(*dep) {
-          *degree -= 1;
-          if *degree == 0 {
-            queue.push_back(dep);
-          }
-        }
-      }
-    }
-  }
-  if result.len() == graph.len() {
-    Ok(result)
-  } else {
-    Err("Circular dependency detected".to_string())
-  }
-}
-
 impl Type {
   fn free_type_vars(&self) -> BTreeSet<String> {
     maybe_grow(|| match self {
       Type::Var(x) => BTreeSet::from([x.clone()]),
-      Type::Arr(t1, t2) => t1.free_type_vars().into_iter().chain(t2.free_type_vars()).collect(),
+      Type::Arr(t1, t2) => t1.free_type_vars().union(&t2.free_type_vars()).cloned().collect(),
     })
   }
 
@@ -165,23 +92,14 @@ impl Type {
       Type::Arr(t1, t2) => Type::Arr(Box::new(t1.subst(subst)), Box::new(t2.subst(subst))),
     })
   }
-
-  /// Converts a monomorphic type into a type scheme by abstracting
-  /// over the type variables free in `t`, but not free in the type
-  /// environment.
-  fn generalize(&self, env: &TypeEnv) -> Scheme {
-    let vars_env = env.free_type_vars();
-    let vars_t = self.free_type_vars();
-    let vars = vars_t.difference(&vars_env).cloned().collect();
-    Scheme(vars, self.clone())
-  }
 }
 
 impl Scheme {
   fn free_type_vars(&self) -> BTreeSet<String> {
     let vars = self.1.free_type_vars();
     let bound_vars = self.0.iter().cloned().collect();
-    vars.difference(&bound_vars).cloned().collect()
+    let free_vars = vars.difference(&bound_vars);
+    free_vars.cloned().collect()
   }
 
   fn subst(&self, subst: &Subst) -> Scheme {
@@ -203,9 +121,6 @@ impl Scheme {
 }
 
 impl Subst {
-  /// Compose two substitutions.
-  ///
-  /// Applies the first substitution to the second, and then inserts the result into the first.
   fn compose(&self, other: &Subst) -> Subst {
     let other = other.0.iter().map(|(x, t)| (x.clone(), t.subst(self)));
     let subst = self.0.iter().map(|(x, t)| (x.clone(), t.clone())).chain(other).collect();
@@ -228,10 +143,14 @@ impl TypeEnv {
     TypeEnv(env)
   }
 
-  fn append(&self, name: &str, scheme: Scheme) -> TypeEnv {
-    let mut env = self.0.clone();
-    env.insert(name.to_string(), scheme);
-    TypeEnv(env)
+  /// Converts a monomorphic type into a type scheme by abstracting
+  /// over the type variables free in `t`, but not free in the type
+  /// environment.
+  fn generalize(&self, t: &Type) -> Scheme {
+    let vars_env = self.free_type_vars();
+    let vars_t = t.free_type_vars();
+    let vars = vars_t.difference(&vars_env).cloned().collect();
+    Scheme(vars, t.clone())
   }
 }
 
@@ -243,24 +162,10 @@ impl VarGen {
   }
 }
 
-fn infer_program(program: &Program) -> Result<ProgramTypes, String> {
-  let mut types = BTreeMap::new();
-  let mut var_gen = VarGen::default();
-  let mut env = TypeEnv::default();
-
-  // Get the topological order of functions
-  let order = program.topological_order()?;
-  eprintln!("Topological order: {order:?}");
-
-  // Process functions in topological order
-  for name in order {
-    if let Some(body) = program.fns.get(&name) {
-      let (s1, bod_t) = infer(&env, body, &mut var_gen)?;
-      env = env.append(&name, bod_t.generalize(&env.subst(&s1)));
-      types.insert(name, bod_t.subst(&s1));
-    }
-  }
-  Ok(ProgramTypes(types))
+/// Infer the type of a term in the given environment.
+fn infer_term(term: &Term, program: &Program, var_gen: &mut VarGen) -> Result<Type, String> {
+  let (subst, typ) = infer_term_go(&TypeEnv::default(), term, program, var_gen)?;
+  Ok(typ.subst(&subst))
 }
 
 /// Infer the type of a term in the given environment.
@@ -269,7 +174,12 @@ fn infer_program(program: &Program) -> Result<ProgramTypes, String> {
 ///
 /// The returned substitution records the type constraints imposed on type variables by the term.
 /// The returned type is the type of the term.
-fn infer(env: &TypeEnv, term: &Term, var_gen: &mut VarGen) -> Result<(Subst, Type), String> {
+fn infer_term_go(
+  env: &TypeEnv,
+  term: &Term,
+  program: &Program,
+  var_gen: &mut VarGen,
+) -> Result<(Subst, Type), String> {
   maybe_grow(|| match term {
     Term::Var(name) => match env.0.get(name) {
       Some(scheme) => {
@@ -279,34 +189,51 @@ fn infer(env: &TypeEnv, term: &Term, var_gen: &mut VarGen) -> Result<(Subst, Typ
       None => Err(format!("unbound variable '{}'", name)),
     },
     Term::Lam(name, body) => {
-      let var_t = var_gen.fresh();
-      let env = env.append(name, Scheme(vec![], var_t.clone()));
-      let (s, bod_t) = infer(&env, body, var_gen)?;
-      let var_t = var_t.subst(&s);
-      Ok((s, Type::Arr(Box::new(var_t), Box::new(bod_t))))
+      let type_var = var_gen.fresh();
+      let mut env = env.clone();
+      env.0.insert(name.clone(), Scheme(vec![], type_var.clone()));
+      let (subst, bod_type) = infer_term_go(&env, body, program, var_gen)?;
+      let arg_type = type_var.subst(&subst);
+      let lam_type = Type::Arr(Box::new(arg_type), Box::new(bod_type));
+      Ok((subst, lam_type))
     }
     Term::App(fun, arg) => {
-      let (s1, fun_t) = infer(env, fun, var_gen)?;
-      let (s2, arg_t) = infer(&env.subst(&s1), arg, var_gen)?;
-      let app_t = var_gen.fresh();
-      let s3 = unify(fun_t, Type::Arr(Box::new(arg_t), Box::new(app_t.clone())))?;
-      Ok((s3.compose(&s2).compose(&s1), app_t.subst(&s3)))
+      let type_var = var_gen.fresh();
+      let (subst1, fun_type) = infer_term_go(env, fun, program, var_gen)?;
+      let (subst2, arg_type) = infer_term_go(&env.subst(&subst1), arg, program, var_gen)?;
+      let subst3 = unify(fun_type, Type::Arr(Box::new(arg_type), Box::new(type_var.clone())))?;
+      let subst = subst3.compose(&subst2).compose(&subst1);
+      let app_type = type_var.subst(&subst);
+      Ok((subst, app_type))
     }
     Term::Let(name, val, body) => {
-      let (s1, val_t) = infer(env, val, var_gen)?;
-      let bod_env = env.append(name, val_t.generalize(&env.subst(&s1)));
-      let (s2, bod_t) = infer(&bod_env, body, var_gen)?;
-      Ok((s1.compose(&s2), bod_t))
+      let (subst1, val_type) = infer_term_go(env, val, program, var_gen)?;
+      let val_env = env.subst(&subst1);
+      let val_scheme = val_env.generalize(&val_type);
+      let mut body_env = env.clone();
+      body_env.0.insert(name.clone(), val_scheme);
+      let (subst2, body_type) = infer_term_go(&body_env, body, program, var_gen)?;
+      Ok((subst1.compose(&subst2), body_type))
+    }
+    Term::Ref(name) => {
+      if let Some(ctr) = program.ctrs.get(name) {
+        let adt = program.adts.get(ctr).unwrap();
+        let fields = adt.ctrs.get(name).unwrap();
+        // field1 -> ... -> fieldN -> (ctr_name a1 ... aN)
+        todo!()
+      } else {
+        Err(format!("unbound constructor '{}'", name))
+      }
     }
   })
 }
 
 fn unify(t1: Type, t2: Type) -> Result<Subst, String> {
   maybe_grow(|| match (t1, t2) {
-    (Type::Arr(l1, r1), Type::Arr(l2, r2)) => {
-      let s1 = unify(*l1, *l2)?;
-      let s2 = unify(r1.subst(&s1), r2.subst(&s1))?;
-      Ok(s2.compose(&s1))
+    (Type::Arr(t11, t12), Type::Arr(t21, t22)) => {
+      let s1 = unify(*t11, *t21)?;
+      let s2 = unify(t12.subst(&s1), t22.subst(&s1))?;
+      Ok(s1.compose(&s2))
     }
     (t1, Type::Var(x)) => bind_var(x, t1),
     (Type::Var(x), t2) => bind_var(x, t2),
@@ -327,16 +254,14 @@ fn bind_var(x: String, t: Type) -> Result<Subst, String> {
       "cannot bind variable '{x}' to term {t} because it occurs as a free variable"
     ));
   }
-  Ok(Subst(BTreeMap::from([(x.to_string(), t.clone())])))
+  Ok(Subst(BTreeMap::from([(x, t)])))
 }
 
-fn refresh_vars(types: ProgramTypes) -> ProgramTypes {
-  let mut new_types = BTreeMap::new();
-  for (name, mut typ) in types.0 {
-    refresh_vars_go(&mut typ, &mut BTreeMap::new(), &mut VarGen::default());
-    new_types.insert(name, typ);
+fn refresh_vars(mut types: ProgramTypes) -> ProgramTypes {
+  for typ in types.0.values_mut() {
+    refresh_vars_go(typ, &mut BTreeMap::new(), &mut VarGen::default());
   }
-  ProgramTypes(new_types)
+  types
 }
 
 fn refresh_vars_go(typ: &mut Type, map: &mut BTreeMap<String, Type>, var_gen: &mut VarGen) {
@@ -369,7 +294,7 @@ impl TermParser<'_> {
       let name = self.parse_name()?;
       self.consume("=")?;
       let term = self.parse_term()?;
-      program.fns.insert(name, term);
+      program.terms.insert(name, term);
       self.skip_trivia();
     }
     Ok(program)
@@ -435,7 +360,7 @@ impl FromStr for Program {
 
 impl std::fmt::Display for Program {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    for (name, term) in &self.fns {
+    for (name, term) in &self.terms {
       writeln!(f, "{} = {}", name, term)?;
     }
     Ok(())

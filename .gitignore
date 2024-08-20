@@ -1,1 +1,10 @@
+# ignore the rust build files
 /target
+
+# ignore the haskell build files
+*.hi
+*.o
+hm
+hm_rec
+hm_rec_adt
+hm_mut_rec_adt

@@ -1,5 +1,5 @@
 //! Simple implementation of Hindley-Milner type inference in Rust.
-//! Extended with non-recursive top-level function references.
+//! Extended with simply-recursive top-level function references.
 //!
 //! Implements Algorithm W, based on `https://github.com/mgrabmueller/AlgorithmW`.
 
@@ -152,7 +152,7 @@ impl Type {
   fn free_type_vars(&self) -> BTreeSet<String> {
     maybe_grow(|| match self {
       Type::Var(x) => BTreeSet::from([x.clone()]),
-      Type::Arr(t1, t2) => t1.free_type_vars().into_iter().chain(t2.free_type_vars()).collect(),
+      Type::Arr(t1, t2) => t1.free_type_vars().union(&t2.free_type_vars()).cloned().collect(),
     })
   }
 
